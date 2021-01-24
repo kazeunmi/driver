@@ -1,0 +1,14 @@
+# Makefile
+
+obj-m += exmodule.o
+ccflags-y += -Wall
+
+export ARCH=arm
+export CROSS_COMPILE=arm-linux-gnueabihf-
+
+KDIR=$(HOME)/project/linux-pi
+
+default:
+	$(MAKE) -C $(KDIR) M=$(PWD)
+clean:
+	$(MAKE) -C $(KDIR) M=$(PWD) clean

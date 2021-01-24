@@ -1,0 +1,12 @@
+GPATH
+GRTAGS
+GTAGS
+linux-pi
+*.html
+*.symvers
+*.order
+*.mod.c
+*.mod
+*.cmd
+*.ko
+*.a

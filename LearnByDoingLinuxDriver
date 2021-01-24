@@ -1,0 +1,881 @@
+* ======================================================================
+* Building Linux kernel module
+
+This is the first step for our Linux driver experiment. We create the simplest kernel module and run it on Raspberry Pi. 
+
+The source code and Makefile are as follows.
+
+  <exmodule.c>
+
+  <Makefile-exmodule>
+
+We need the following two machines for this experiment.
+
+  - Raspberry Pi, running Raspbian. We call this machine "pi".
+  - Desktop or laptop machine, running Ubuntu. We call this machine "desk".
+
+First of all, go throuth the following page to prepare tools and build Linux kernel. You have to go through only "Cross-compiling" section. However, I think you want to go throught the entire page at least once to get familiar with the workflow.
+
+  https://www.raspberrypi.org/documentation/linux/kernel/building.md
+
+We assume the following two directories.
+
+  - ~/project/linux-pi/       .... Linux kernel tree
+  - ~/project/driver/         .... Your Linux driver source files
+
+Once the preparation is done, you can build your driver as follows.
+
+  desk> cd ~/project/driver/
+  desk> make
+
+This should create exmodule.ko, your Linux driver packaged in a module. Let's copy it to pi.
+
+  desk> scp exmodule.ko pi:/tmp/
+
+Then on pi, you can insert the module on the kernel.
+
+  pi> sudo insmod /tmp/exmodule.ko
+  pi> tail -1 /var/log/messages
+      Dec 12 20:46:18 pi kernel: [83395.088746] exmodule_init()
+
+You can see the module registered in the kernel as follows.
+
+  pi> lsmod | grep exmodule
+      exmodule               16384  0
+
+Also try remove the module.
+
+  pi> sudo rmmod exmodule
+  pi> tail -2 /var/log/messages
+      Dec 12 20:46:18 pi kernel: [83395.088746] exmodule_init()
+      Dec 12 20:49:13 pi kernel: [83570.075864] exmodule_exit()
+
+Now you are ready to play with Linux driver.
+
+* Character device
+
+We create the most basic Linux device: character device. You can perform open, close, read, and write for the device.
+
+  <exchrdev.c>
+
+For Makefile, use the same one as the previous example, and just add the following line.
+
+  obj-m += exchrdev.o
+
+Build on desk and send the module to pi.
+
+  desk> cd ~/project/driver/
+  desk> make
+  desk> scp exchrdev.ko pi:/tmp/
+
+Insert the module on pi.
+
+  pi> sudo insmod /tmp/exchrdev.ko
+
+Because the character driver is written in an old way, you have to create the device node manually as follows.
+
+  pi> sudo mknod /dev/exchrdev c 120 1  # 120 is the device number of this driver
+  pi> sudo chmod 666 /dev/exchrdev
+
+Now test write and read.
+
+  pi> echo "hello world" > /dev/exchrdev
+  pi> cat /dev/exchrdev
+      hello world
+  pi> sudo rmmod exchrdev
+
+In this example, I used device number 120, which is reserved for "LOCAL/EXPERIMENTAL USE". Most of the device numbers are reserved for specific purposes. For more information, take a look at the following site.
+
+  https://www.kernel.org/doc/Documentation/admin-guide/devices.txt
+
+I have worked around a very important rule in this example: userspace accesss from driver. This is not necessary in this example because I used kernel convenience functions: simple_read_from_buffer and simple_write_to_buffer. You should know that raw access to char __user *buf requires special treatment (and why). Read get_user() and put_user() section in the following site.
+
+  https://www.kernel.org/doc/html/v4.13/kernel-hacking/hacking.html
+
+* Device node creation
+
+In the previous example, we used legacy interface for chararcter device. We had to hard code the device number, and create device node manually. Here we use the newer interface. The device number is allocated, and the device node is created automatically.
+
+The source code is as follows. To make it simple, this driver has only open and close.
+
+  <excdev.c>
+
+For Makefile, use the same one as the previous example, and just add the following line.
+
+  obj-m += excdev.o
+
+Build and do insmod.
+
+  desk> cd ~/project/driver/ && make
+  desk> scp excdev.ko pi:/tmp/
+  pi> sudo insmod /tmp/excdev.ko
+
+Now see the device node is created automatically.
+
+  pi> cat /proc/devices | grep excdev
+      239 excdev
+  pi> ls -l /dev/excdev*
+      crw------- 1 root root 239, 0 Dec 13 17:36 /dev/excdev0
+      crw------- 1 root root 239, 1 Dec 13 17:36 /dev/excdev1
+      crw------- 1 root root 239, 2 Dec 13 17:36 /dev/excdev2
+
+Remove and see the divice node is removed.
+
+  pi> sudo rmmod excdev
+  pi> ls -l /dev/excdev*
+
+* Misc device
+
+What we did do far can be done even easier by using misc device. The code is amazingly short.
+
+  <exmisc.c>
+
+For Makefile, use the same one as the previous example, and just add the following line.
+(I will skip this step for the future.)
+
+  obj-m += exmisc.o
+
+Build and do insmod.
+
+  desk> cd ~/project/driver/ && make
+  desk> scp exmisc.ko pi:/tmp/
+
+  pi> sudo insmod /tmp/exmisc.ko
+
+Now see the device node is created automatically. Misc device has major number 10. Each misc device receives unique minor mumber (60 in this case).
+
+  pi> ls -l /dev/exmisc*
+      crw------- 1 root root 10, 60 Dec 13 18:07 /dev/exmisc
+
+Do write and read.
+
+  pi> sudo bash -c 'echo "hello world" > /dev/exmisc'
+  pi> sudo cat /dev/exmisc
+      hello world
+
+Remove and see the divice node is removed.
+
+  pi> sudo rmmod exmisc
+  pi> ls -l /dev/exmisc*
+
+* printk and trace_printk
+
+This example is for print family functions. My favorite debug aid is trace_printk. It is lighter than printk. You may call it even in interrupt handlers.
+
+  <extrace.c>
+
+Build and do insmod.
+
+  desk> cd ~/project/driver/ && make
+  desk> scp extrace.ko pi:/tmp/
+
+  pi> sudo insmod /tmp/extrace.ko
+  pi> sudo rmmod extrace
+
+Let's take a look at printk output.
+
+  pi> journalctl --since='7 minute ago'
+      .....
+      Dec 14 20:53:17 pi kernel: printed by pr_err
+      Dec 14 20:53:17 pi kernel: printed by pr_warn
+      Dec 14 20:53:17 pi kernel: printed by pr_notice
+      Dec 14 20:53:17 pi kernel: printed by pr_info
+      Dec 14 20:53:17 pi kernel: printed by printk
+      .....
+
+  pi> journalctl --since='7 minute ago' --priority=warning
+      .....
+      Dec 14 20:53:17 pi kernel: printed by pr_err
+      Dec 14 20:53:17 pi kernel: printed by pr_warn
+      Dec 14 20:53:17 pi kernel: printed by printk
+
+Let's take a look at trace_printk output.
+
+  pi> sudo cat /sys/kernel/debug/tracing/trace
+  # tracer: nop
+  #
+  # entries-in-buffer/entries-written: 6/6   #P:4
+  #
+  #                                _-----=> irqs-off
+  #                               / _----=> need-resched
+  #                              | / _---=> hardirq/softirq
+  #                              || / _--=> preempt-depth
+  #                              ||| /     delay
+  #           TASK-PID     CPU#  ||||   TIMESTAMP  FUNCTION
+  #              | |         |   ||||      |         |
+              insmod-12915   [003] ....  3024.144240: 0x7f1cd030: printed by trace_printk
+               rmmod-12942   [003] ....  3030.712234: 0x7f1cd000: printed by trace_printk
+
+* Accessing registers with ioremap
+
+It is time to access real device. Let's try GPIO. We use ioremap to access GPIO registers.
+
+First of all, connect LED to GPIO as follows.
+
+  GPIO4 --- LED --- 10kOhm --- GND
+
+Test the connection with Python.
+
+  pi> python3
+  >>> import RPi.GPIO as GPIO
+  >>> GPIO.setmode(GPIO.BCM)
+  >>> GPIO.setup(4, GPIO.OUT)
+  >>> GPIO.output(4, True)    # Turn LED on
+  >>> GPIO.output(4, False)   # Turn LED off
+
+Now we are ready to write a driver. Note that we are using ioremap.
+
+  <exgpio.c>
+
+Build and test.
+
+  desk> cd ~/project/driver/ && make
+  desk> scp exgpio.ko pi:/tmp/
+
+  pi> sudo insmod /tmp/exgpio.ko
+  pi> sudo sh -c 'echo > /dev/exgpio'  # Turn LED on
+  pi> sudo sh -c 'echo > /dev/exgpio'  # Turn LED off
+
+* Interrupt handler
+
+In this experiment, we use interrupt for the first time.
+
+First of all, connect a switch to GPIO as follows.
+
+  GPIO5 --- 10kOhm --- 3.3V
+  GPIO5 --- switch --- GND
+
+Test the connection with Python.
+
+  pi> python3
+  >>> import gpiozero
+  >>> button = gpiozero.Button(5)
+  >>> button.wait_for_press()      # Waits here for the button
+
+Now press the button on GPIO5 to get to the prompt.
+
+We are ready to try interrupt in the driver.
+
+  <exinterrupt.c>
+
+Build and run.
+
+  desk> cd ~/project/driver/ && make
+  desk> scp exinterrupt.ko pi:/tmp/
+
+  pi> sudo insmod /tmp/exinterrupt.ko
+
+You can check the count of the interrupts as follows.
+
+  pi> grep exinterrupt /proc/interrupts
+
+Now press the button a few times to generate GPIO interrupts. And do the same command. The number may be larger than you expect. That is because of the chattering glitch of the switch.
+
+You can also see the trace_printk output.
+
+  pi> sudo cat /sys/kernel/debug/tracing/trace
+      # tracer: nop
+      #
+      # entries-in-buffer/entries-written: 1/1   #P:4
+      #
+      #                                _-----=> irqs-off
+      #                               / _----=> need-resched
+      #                              | / _---=> hardirq/softirq
+      #                              || / _--=> preempt-depth
+      #                              ||| /     delay
+      #           TASK-PID     CPU#  ||||   TIMESTAMP  FUNCTION
+      #              | |         |   ||||      |         |
+                <idle>-0       [000] d.h. 262187.256140: exinterrupt_isr: exinterrupt_isr
+
+As you see, the interrupt handler was executed. In the output, "h" means it was executed in the interrupt context, and "d" means interrupt was disabled. On the recent Linux kernel, interrupt handlers are executed with interrupt disabled.
+
+Note that interrupt handlers are executed in very dangerous way, interrupting other functions, even Linux kernel.
+
+* Waiting for event
+
+In the previous example, we generated interrupt from the switch on GPIO, and let it call the interrupt handler.
+
+This time, we make it more realistic. Part of the driver is waiting for the interrupt, and it wakes up after the interrupt handler.
+
+  <exwaitqueue.c>
+
+Build and run.
+
+  desk> cd ~/project/driver/ && make
+  desk> scp exwaitqueue.ko pi:/tmp/
+
+  pi> sudo insmod /tmp/exwaitqueue.ko
+
+Read from the device. Read blocks at wait_event_interruptible().
+
+  pi> sudo cat /dev/exwaitqueue
+
+Now press the button. Then the previous command returns. Let's see the output from trace_printk.
+
+  pi> sudo cat /sys/kernel/debug/tracing/trace
+  .....
+             cat-21921   [002] .... 71419.797046: exwaitqueue_read: read() waits for interrupt
+          <idle>-0       [000] d.h. 71437.007315: exwaitqueue_isr: Interrupt handler
+             cat-21921   [002] .... 71437.007389: exwaitqueue_read: read() is woken up
+          <idle>-0       [000] d.h. 71437.099921: exwaitqueue_isr: Interrupt handler
+
+* Threaded IRQ
+
+Interrupt handler is a background job. Because it is executed by interrupting whatever is running at that point, it should not run too long. Plus, you cannot use any waiting funtions in interrupt handlers. So if the background job requires more work, you have to do bare mimimum in the interrupt handler, and do the rest in a process context. Threaded IRQ is a handy way for such case.
+
+  <exthreaded.c>
+
+Build and run.
+
+  desk> cd ~/project/driver/ && make
+  desk> scp exthreaded.ko pi:/tmp/
+
+  pi> sudo insmod /tmp/exthreaded.ko
+
+Now press the button to cause an interrupt. Then let's see the output from trace_printk.
+
+  pi> sudo cat /sys/kernel/debug/tracing/trace
+  .....
+           <idle>-0       [000] d.h. 177739.548396: exthreaded_isr: Interrupt handler
+  irq/166-exthrea-16723   [002] .... 177739.548453: exthreaded_thread: Thread
+
+exthreaded_isr was executed first, then exthreaded_thread is executed after that. The "h" on the exthreaded_isr means it is an interrupt handler. The "d" means interrupt is disabled. On recent Linux kernel, interrupt handlers are executed with interrupt disabled.
+
+* Work queue
+
+Threaded IRQ creates a process associated to an interrupt. In case you need threads in general, work queue is the way.
+
+  <exworkqueue.c>
+
+Build and run.
+
+  desk> cd ~/project/driver/ && make
+  desk> scp exworkqueue.ko pi:/tmp/
+
+  pi> sudo insmod /tmp/exworkqueue.ko
+
+Two threads are started.
+
+  - exworkqueue_work: Goes around 5 times, sleeping for 10 ms each round.
+  - exworkqueue_delayed_work: One shot after 50 ms.
+
+Let's see the output from trace_printk.
+
+  pi> sudo rmmod exworkqueue
+  pi> sudo cat /sys/kernel/debug/tracing/trace
+     .....
+     kworker/1:2-25051   [001] .... 180736.601623: 0x7f1cd054: exworkqueue_work(): 0
+     kworker/1:2-25051   [001] .... 180736.630242: 0x7f1cd054: exworkqueue_work(): 1
+     kworker/1:1-28682   [001] .... 180736.660244: 0x7f1cd000: exworkqueue_delayed_work()
+     kworker/1:2-25051   [001] .... 180736.670334: 0x7f1cd054: exworkqueue_work(): 2
+     kworker/1:2-25051   [001] .... 180736.700218: 0x7f1cd054: exworkqueue_work(): 3
+     kworker/1:2-25051   [001] .... 180736.730220: 0x7f1cd054: exworkqueue_work(): 4
+
+* Mutex and atomic
+
+If your driver runs more than one process at the same time, you have to think about concurrency. In this example, we see what bad thing happens if you are not careful. And two solutions are introduced: atomic and mutex.
+
+  <exmutex.c>
+
+This program runs 4 instances of exmutex_work(), each on different CPUs. exmutex_work() counts on 3 counters at full speed. Those 3 counters are shared among 4 exmutex_work(). First counter is a simple variable, where the bad thing happens. Second counter is guarded by mutex. The third one is atomic variable which is guarded by itself.
+
+Build and run.
+
+  desk> cd ~/project/driver/ && make
+  desk> scp exmutex.ko pi:/tmp/
+
+  pi> sudo insmod /tmp/exmutex.ko
+
+Now press the button to cause an interrupt. Then let's see the output from trace_printk.
+
+  pi> sudo rmmod exmutex
+  pi> sudo cat /sys/kernel/debug/tracing/trace
+  .....
+      insmod-8264    [003] .... 26397.328512: 0x7f1cd148: counter: 3830342 < 3830467 == 3830467
+          
+3830342 is the total count on the first counter, which is not guarded. The count is smaller than the correct value 3830467 because concurrent access happened. This is something you have to avoid in driver programming. 3830467 is the total count on the other guarded counters.
+
+* Spinlock and atomic
+
+The previous example was for the concurrency among processes. Mutex was one of the good solutions. But it cannot be used if interrupt handlers are involved. Instead, we use spinlock this time. Atomic still works.
+
+  <exspinlock.c>
+
+This program runs 1 loop of a thread, and a time interrupt handler. They counts on 3 counters at full speed. First counter is a simple variable, where the bad thing happens. Second counter is guarded by spinlock. The third one is atomic variable which is guarded by itself.
+
+Build and run.
+
+  desk> cd ~/project/driver/ && make
+  desk> scp exspinlock.ko pi:/tmp/
+
+  pi> sudo insmod /tmp/exspinlock.ko
+
+Then let's see the output from trace_printk.
+
+  pi> sudo rmmod exspinlock
+  pi> sudo cat /sys/kernel/debug/tracing/trace
+  .....
+  insmod-27285   [000] .n.. 39410.225181: 0x7f1cd184: counter: 542247 < 542436 == 542436
+          
+542247 is the total count on the first counter, which is not guarded. The count is smaller than the correct value 542436 because concurrent access happened. This is something you have to avoid in driver programming. The other two counters are showing the same value 542436, which means they are guarded nicely.
+
+Quiz time. Which one is ok, and which one is a bug?
+
+  1. Thread T grabs spinlock S, then trys to grab spinlock S again
+  2. Thread T grabs spinlock S, then Thread U trys to grab spinlock S
+  3. Thread T on processor C grabs spinlock S, then on the same processor C, interrupt handler H trys to grab spinlock S
+  4. Thread T on processor C grabs spinlock S, then on the different processor D, interrupt handler H trys to grab spinlock S
+  5. Interrupt handler H on processor C grabs spinlock S, then on the different processor D, interrupt handler K trys to grab spinlock S
+
+Answer: 1. Bug; Deadlock. T spins forever. Spinlock is not recursive. 2. OK; U spins until T releases S. 3. Bug; Deadlock. H spins forever. T should have disabled the interrupt on C, by using spin_lock_irqssave(). 4. OK; H spins until T releases S. OK; K spins until H releases S.
+
+For more information, take a look at this short tutorial:  
+
+  - https://www.kernel.org/doc/htmldocs/kernel-locking/index.html
+
+* SSD1306 display on I2C
+
+I2C is a handy bus which requires only 4 lines (SDA, SCL, Vcc, and GND). There are wide variety of cheap devices off the shelf. We use SSD1306 display, which is available at under $10 at ebay.com or amazon.com.
+
+First, enable I2C on Raspbian.
+
+  pi> sudo raspi-config
+      Select Interface Options -> I2C -> Yes
+
+Check if the device node is created.
+
+  pi> ls /dev/i2c*
+      /dev/i2c-1
+
+Connect SSD1306 display as follows.
+
+  SSD1306     Raspberry Pi
+      SDA --- SDA
+      SCL --- SCL
+      Vcc --- 3V3
+      GND --- GND
+
+I2C address of SSD1306 is 0x3c. Let's see if it is detected.
+
+  pi> i2cdetect -y 1              # scan I2C 1
+           0  1  2  3  4  5  6  7  8  9  a  b  c  d  e  f
+      00:          -- -- -- -- -- -- -- -- -- -- -- -- -- 
+      10: -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- 
+      20: -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- 
+      30: -- -- -- -- -- -- -- -- -- -- -- -- 3c -- -- -- 
+      40: -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- 
+      50: -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- 
+      60: -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- 
+      70: -- -- -- -- -- -- -- --                         
+
+SSD1306 has a status register. Let's read it.
+
+  pi> i2cget -y 1 0x3c
+      0x43                        # bit 6 is 1, meaning display off
+
+Bit 6 is showing "display off".
+
+Now send a command to turn on the display.
+
+  pi> i2cset -y 1 0x3c 0x00 0xaf  # turn display on (0x00 is for command, 0xaf is display on)
+  pi> i2cget -y 1 0x3c
+      0x03                        # bit 6 is 0, meaning display on
+
+Still nothing is shown on the display. That is normal.
+Probably you want to see something on the display. Then try the commands below.
+
+  # Init sequence from SD1306 app note
+  pi> for d in 0xa8 0x3f 0xd3 0x00 0x40; do i2cset -y 1 0x3c 0 $d; done
+  pi> for d in 0xa1 0xc8 0xda 0x12; do i2cset -y 1 0x3c 0 $d; done
+  pi> for d in 0x81 0x80 0xa4 0xa6; do i2cset -y 1 0x3c 0 $d; done
+  pi> for d in 0xd5 0x80 0x8d 0x14 0xaf; do i2cset -y 1 0x3c 0 $d; done
+
+  # Page mode write
+  pi> for d in 0x20 0x02; do i2cset -y 1 0x3c 0 $d; done
+  pi> i2cset -y 1 0x3c 0 0xb0  # page 0 (first line)
+  pi> for i in {0..127}; do i2cset -y 1 0x3c 0x40 $i; done
+  pi> i2cset -y 1 0x3c 0 0xb7  # page 7 (last line)
+  pi> for i in {0..127}; do i2cset -y 1 0x3c 0x40 $i; done
+
+* I2C driver
+In the prevous experiment, we connected SSD1306 display on I2C. Let's write a driver for this device.
+
+  <exi2c.c>
+
+Build and install.
+
+  desk> cd ~/project/driver/ && make
+  desk> scp exi2c.ko pi:/tmp/
+
+  pi> sudo insmod /tmp/exi2c.ko
+  pi> sudo cat /sys/kernel/debug/tracing/trace
+      insmod-11488   [001] .... 116547.550313: exi2c_init: exi2c_init()
+          
+This time, we need attention here. There are two initialization functions in this driver.
+
+  - exi2c_init() is called when the module is inserted to the kernel.
+  - exi2c_prove() is called when the device is detected on the I2C bus.
+
+exi2c_prove() is not called yet because devices on I2C bus is not detected automatically.
+Let's tell the kernel that we have "exi2c" device at address 0x3c on i2c-1.
+
+  pi> sudo sh -c 'echo exi2c 0x3c > /sys/bus/i2c/devices/i2c-1/new_device'
+  pi> sudo cat /sys/kernel/debug/tracing/trace
+      insmod-11488   [001] .... 116547.550313: exi2c_init: exi2c_init()
+          sh-11580   [002] .... 116567.221308: exi2c_probe: exi2c_probe(): id->name=exi2c client->addr=3c
+
+Now exi2c_prove() is called. Do you see a picture on the display?
+
+To clean up, do as follows.
+
+  pi> sudo sh -c 'echo 0x3c > /sys/bus/i2c/devices/i2c-1/delete_device'
+  pi> sudo rmmod exi2c
+
+In this example, we wrote /sys/bus/i2c/devices/i2c-1/new_device manually. The same thing is done better by using device tree. Please take a look at the section.
+
+* SSD1306 support on Raspbian
+
+
+We used SSD1306 as an example of writing our own device driver. However, SSD1306 is already supported nicely on Raspbian. So I stop the example at this point, and tell you how to use the driver shipped with Raspbian.
+
+You just have to tell Linux that SSD1306 is connected by loading device tree overlay, which is already prepared in /boot directory.
+
+  pi> ls /boot/overlays/ssd1306*
+      /boot/overlays/ssd1306.dtbo  /boot/overlays/ssd1306-spi.dtbo
+
+You should use the first file. The second one is for SPI interface.
+
+  pi> sudo reboot  # to forget about the previous experiment
+  pi> sudo dtoverlay ssd1306
+
+Then, the framebuffer driver for SSD1307 is automatically loaded.
+
+  pi> lsmod | grep ssd13
+      ssd1307fb              20480  0
+      syscopyarea            16384  1 ssd1307fb
+      sysfillrect            16384  1 ssd1307fb
+      sysimgblt              16384  1 ssd1307fb
+      fb_sys_fops            16384  1 ssd1307fb
+      backlight              20480  1 ssd1307fb
+
+  pi> ls /dev/fb*
+      /dev/fb0  /dev/fb1
+
+Let's write on the framebuffer.
+
+  pi> sudo chmod 666 /dev/fb1
+  pi> fbset -fb /dev/fb1
+      mode "128x64"
+      geometry 128 64 128 64 1
+      timings 0 0 0 0 0 0 0
+      rgba 1/0,1/0,1/0,0/0
+      endmode
+
+  pi> cat /dev/urandom > /dev/fb1
+  pi> dd if=/dev/zero of=/dev/fb1
+
+With ImageMagick, you can show an image on the display.
+
+  pi> sudo apt install imagemagick
+
+  pi> convert -resize 128x64 -extent 128x64 \
+      -gravity center -monochrome -depth 1 \
+      -flip -negate \
+      ~/Pictures/sample.jpg mono:/dev/fb1
+
+* WARN_ON
+
+When you develop a device driver, you want to make the normal case working first. You do not want to take time to write decent error handling yet. It is nice to mark such conditions as "do it later". WARN_ON() is handy for such cases.
+
+As long as such condition does not happen, WARN_ON works as a marker for the programmer.
+
+Let's see what happens if WARN_ON hits in the following example.
+
+  <exwarnon.c>
+
+  desk> cd ~/project/driver/ && make
+  desk> scp exwarnon.ko pi:/tmp/
+
+  pi> sudo insmod /tmp/exwarnon.ko
+
+No error is printed. But you can see the error in systemd journal. Source line information is nicely included.
+
+  pi> journalctl --since="3 minute ago" | grep WARNING
+      Dec 21 13:44:01 pi kernel: WARNING: CPU: 3 PID: 1263 at /home/kaz/project/driver/exwarnon.c:18
+      exwarnon_init+0x68/0x74 [exwarnon]
+
+By the way, BUG_ON is similar. But it is too strong for this purpose. Because it kills the process in the middle, the kernel may go into weird state. For example, I saw the module died in the moddle of insmod, and it could not be removed.
+
+* Module parameter
+
+Module can accept parameters at insert time.
+
+Let's use the parameter to change major device number.
+
+  <exparam.c>
+
+  desk> cd ~/project/driver/ && make
+  desk> scp exparam.ko pi:/tmp/
+
+First, let's use default. 120 is used.
+
+  pi> sudo insmod /tmp/exparam.ko
+  pi> grep exparam /proc/devices
+      120 exparam
+  pi> sudo rmmod exparam
+
+Let's try to change it 121.
+
+  pi> sudo insmod /tmp/exparam.ko major=121
+  pi> grep exparam /proc/devices
+      121 exparam
+  pi> cat /sys/module/exparam/parameters/major
+      121
+  pi> sudo rmmod exparam
+
+You can also use hexadecimal.
+
+  pi> sudo insmod /tmp/exparam.ko major=0x7f
+  pi> grep exparam /proc/devices
+      127 exparam
+  pi> sudo rmmod exparam
+
+* debugfs
+
+debugfs allows you to read/write some parameters for debugging.
+
+  <exdebugfs.c>
+
+  desk> cd ~/project/driver/ && make
+  desk> scp exdebugfs.ko pi:/tmp/
+
+  pi> sudo insmod /tmp/exdebugfs.ko
+
+You can access the parameters as follows.
+
+  pi> sudo ls /sys/kernel/debug/exdebugfs/
+      param1_u32  param1_x32
+
+In this example, param1_u32 and param1_x32 are the same parameter.
+The difference is how they are printed.
+
+  pi> sudo head /sys/kernel/debug/exdebugfs/param1_{u,x}32
+      ==> /sys/kernel/debug/exdebugfs/param1_u32 <==
+      0
+      ==> /sys/kernel/debug/exdebugfs/param1_x32 <==
+      0x00000000
+
+You can change the value as follows. 
+
+  pi> sudo sh -c 'echo 65535 > /sys/kernel/debug/exdebugfs/param1_u32'
+  pi> sudo head /sys/kernel/debug/exdebugfs/param1_u32
+      65535
+
+You can use both decimal and hexadecimal for writing.
+
+  pi> sudo sh -c 'echo 0x12345678 > /sys/kernel/debug/exdebugfs/param1_u32'
+  pi> sudo head /sys/kernel/debug/exdebugfs/param1_x32
+      0x12345678
+
+  pi> sudo rmmod exdebugfs
+
+* sysfs
+
+sysfs is more official way to read/write some parameters.
+
+  <exsysfs.c>
+
+  desk> cd ~/project/driver/ && make
+  desk> scp exsysfs.ko pi:/tmp/
+
+  pi> sudo insmod /tmp/exsysfs.ko
+
+You can access the parameters as follows.
+
+  pi> cat /sys/class/misc/exsysfs/data
+      data = 0x12345678
+
+* configfs
+
+You can read kernel configuration from configfs.
+
+However, by default, configfs is not compiled in the kernel. Instead, it is compiled as a module. So you can enable it as follows.
+
+  pi> sudo modprobe configs
+
+Then you will see /proc/config.gz which acts like gzipped file.
+
+  pi> zcat /proc/config.gz
+  pi> zgrep CONFIG_UIO /proc/config.gz
+
+* Error code
+
+Error code is defined in the Linux source tree as follows.
+
+  #define	EPERM		 1	/* Operation not permitted */
+  #define	ENOENT		 2	/* No such file or directory */
+  #define	ESRCH		 3	/* No such process */
+  #define	EINTR		 4	/* Interrupted system call */
+  .....
+
+Note that those definitions are in positive integers. However, those error codes are used as negative integers most of the time. Let's see some typical cases.
+
+  <exerror.c>
+
+  desk> cd ~/project/driver/ && make
+  desk> scp exerror.ko pi:/tmp/
+
+Test 1 is error checking for gpio_to_irq(). This function returns IRQ number as 0 or positive integer. In case of error, it returns error code as a negative integer.
+
+  pi> sudo insmod /tmp/exerror.ko test=1
+      insmod: ERROR: could not insert module /tmp/exerror.ko: Invalid parameters
+  pi> sudo cat /sys/kernel/debug/tracing/trace
+      .....
+      insmod-22494   [002] .... 277800.452574: 0x7f241034: gpio_to_irq(5) = 166
+      insmod-22494   [002] .... 277800.452587: 0x7f241064: gpio_to_irq(99) = -22
+      insmod-22494   [002] .... 277800.452589: 0x7f24108c: returning -22
+
+gpio_to_irq(99) returned -EINVAL. Because the error code is set as a negative integer in result, we can return it as is from the module init function.
+
+Test 2 is error checking for create_class(). This function returns pointer to the class. In case of error, it returns error code hidden in the pointer. It can be checked by IS_ERR(p), and error code can be extracted by PTR_ERR(p).
+
+  pi> sudo insmod /tmp/exerror.ko test=2
+      insmod: ERROR: could not insert module /tmp/exerror.ko: File exists
+  pi> sudo cat /sys/kernel/debug/tracing/trace
+      .....
+      insmod-875     [003] .n.. 280504.327166: 0x7f241044: class_create() = ffffffef
+      insmod-875     [003] .n.. 280504.327176: 0x7f241080: returning -17
+
+class_create() returned EEXIST encoded in the pointer. In fact, it is encoded just as a negative integer. We used IS_ERR() to find the error condition, and used PTR_ERR() to extract the error code. Note that PTR_ERR() returns a negative integer.
+
+Test 3 is error checking for kmalloc(). This function returns a pointer to the memory. In case of error, it returns NULL pointer.
+
+  pi> sudo insmod /tmp/exerror.ko test=3
+      insmod: ERROR: could not insert module /tmp/exerror.ko: Cannot allocate memory
+  pi> sudo cat /sys/kernel/debug/tracing/trace
+      .....
+      insmod-2364    [001] .... 280879.967877: 0x7f241100: kmalloc() = 00000000
+      insmod-2364    [001] .... 280879.967888: 0x7f241138: returning -12
+
+kmalloc() returned NULL. Our program substituted the error with -ENOMEM.
+
+* Device tree
+
+Linux kernel receives the hardware information at boot time from a device tree. For Raspbian, the bootloader is responsible for choosing the correct device tree file. The device tree files are saved in /boot directory.
+
+If you add any hardware, you have to add the information to the device tree. Instead of modifying the existing device tree, writing device tree overlay is much easier. You can load the overlay on top of the existing device-tree after booting Linux.
+
+  <exdt-overlay.dts>
+
+In this case, we pretend that I2C device is connected at address 0x30 of "i2c1". 
+
+First, install the device tree compiler, and build the binary of the overlay
+
+  pi> sudo apt install device-tree-compiler
+  desk> scp exdt-overlay.dts pi:/tmp
+  pi> dtc -@ -I dts -O dtb -o /tmp/exdt.dtbo /tmp/exdt-overlay.dts
+  pi> sudo cp /tmp/exdt.dtbo /boot/overlays/
+
+Now let's load the overlay.
+
+  pi> sudo dtoverlay exdt
+
+You can see "exdt@30" in the device tree.
+
+  pi> ls /proc/device-tree/soc/i2c@7e804000/exdt@30
+      compatible  name  phandle  reg
+  pi> cat /sys/bus/i2c/devices/1-0030/name
+      exdt
+
+In the example of exi2c.c, we wrote /sys/bus/i2c/devices/i2c-1/new_device manually to tell the kernel about the new I2C device. With the device tree overlay loaded, Linux kernel already knows the existence of the new I2C device. 
+
+  <exdt.c>
+
+This driver tells the kernel to look for compatible = "ex,exdt" in the device tree. It is found in the overlay we just loaded. Then, the driver's probe() function is called accordingly.
+
+  desk> cd ~/project/driver/ && make
+  desk> scp exdt.ko pi:/tmp/
+
+  pi> sudo insmod /tmp/exdt.ko
+  pi> sudo cat /sys/kernel/debug/tracing/trace
+      .....
+      dtoverlay-1884    [003] ....   261.965541: exdt_probe: client->addr=30
+
+Note that the register address 0x30 is automatically read from the device-tree.
+
+* ======================================================================
+* Building kernel Documentation
+
+The kernel includes documentation in Documentation directory. You can just read or grep through the files. But you can also build the documentation into nice format.
+
+  desk> sudo apt-get install graphviz dvipng fonts-noto-cjk latexmk \
+  librsvg2-bin virtualenv texlive-xetex
+  desk> virtualenv sphinx_1.7.9
+  desk> . sphinx_1.7.9/bin/activate
+  desk> pip install -r ./Documentation/sphinx/requirements.txt
+        
+  desk> cd ~/project/driver/linux-pi
+  desk> make htmldocs
+
+The result is in Documentation/output/ directory. However, the files may hit when you grep through the source tree and annoys you. It is better to move the directory somewhere.
+
+  desk> sudo mv Documentation/output /opt/linux-kernel-doc
+
+Then you can read the document by opening file:///opt/linux-kernel-doc/index.html with your browser.
+
+* GNU global
+
+There is no complete set of man pages for Linux kernel yet. The best document is the Linux kernel source tree.
+
+  - Where the function is defined, you can find a comment
+  - Where the function is called, you can find an example
+
+It is nice if you can search the kernel tree from your development directory. You can set up GNU global as follows.
+
+  desk> sudo apt install global
+  desk> cd ~/project/driver/    # Your driver directory
+  desk> ln -s ../linux-pi .     # Symlink to Linux kernel tree
+  desk> gtags
+
+Now you can find the definition of the kernel function.
+
+  desk> global simple_write_to_buffer
+      linux-pi/fs/libfs.c
+
+Also you can find how the function is being called.
+
+  desk> global simple_write_to_buffer -r
+	......
+      linux-pi/drivers/bus/moxtet.c
+      linux-pi/drivers/char/powernv-op-panel.c
+      linux-pi/drivers/crypto/hisilicon/qm.c
+	......
+
+Usually I take a look at both. The latter is handy especially to find how error check should be done.
+
+You should set up your editor so you can do those look up quick. For Emacs users, here is what I do.
+
+  (global-set-key '[f1] 'gtags-find-tag)	;; function (definition)
+  (global-set-key '[f2] 'gtags-find-rtag)       ;; function (caller)
+  (global-set-key '[f3] 'gtags-find-symbol)     ;; variable (definition and use)
+  (global-set-key '[f4] 'gtags-find-pattern)    ;; regexp (any string)
+
+* ======================================================================
+* Caution
+
+Descriptions are kept minimal so readers can come to the point as quickly as possible.
+Details are skipped intentionally because I want to help you only to make things working.
+I trust you do the rest.
+
+Examples are kept very short for the same reason. However, each example is a complete program.
+I pasted the programs here without manual editing. Details, error checking in particular, are
+omitted for simplicity. 
+
+For the C source code, I used 4 spaces for indentation to increase text density.
+For your production code, use tab for indentation as it is the rule in the Linux kernel source.
+
+* ======================================================================
+Local Variables:
+mode: outline
+compile-command: "python3 TextToHtml.py LearnByDoingLinuxDriver"
+End:

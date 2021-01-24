@@ -1,0 +1,464 @@
+* ======================================================================
+* Linuxカーネルモジュールの作り方
+
+まずは、Linuxドライバの実験のための環境を用意します。もっとも簡単なカーネルモジュールをビルドして、Raspberry　Piの上で実行しましょう。
+
+実験のためには、次の２つのマシンが必要です。
+
+  - Raspberry Pi、OSはRaspbian OS。このマシンを"pi"とよびます。
+  - デスクトップかラップトップ、OSはUbuntu。このマシンを"desk"とよびます。
+
+まず、desk上にツールを用意しましょう。
+
+  desk> sudo apt install git bc bison flex libssl-dev make libc6-dev libncurses5-dev
+  desk> sudo apt install crossbuild-essential-armhf crossbuild-essential-arm64
+
+次に、Linuxカーネルのソースコードをダウンロードしてください。
+
+  desk> mkdir ~/project
+  desk> git clone --depth=1 https://github.com/raspberrypi/linux linux-pi
+
+Linuxカーネルをつくる前に、あなたのpiの情報を取得します。
+
+  pi> cat /proc/device-tree/model
+      Raspberry Pi 3 Model B Rev 1.2
+
+カーネルをコンフィグレーションします。
+
+  # Pi 1, Pi Zero, Pi Zero W, Compute Module:
+  desk> cd ~/project/linux-pi
+  desk> KERNEL=kernel
+  desk> make ARCH=arm CROSS_COMPILE=arm-linux-gnueabihf- bcmrpi_defconfig
+
+  # Pi 2, Pi 3, Pi 3+, Compute Module 3:
+  desk> cd ~/project/linux-pi
+  desk> KERNEL=kernel7
+  desk> make ARCH=arm CROSS_COMPILE=arm-linux-gnueabihf- bcm2709_defconfig
+
+  # Raspberry Pi 4:
+  desk> cd ~/project/linux-pi
+  desk> KERNEL=kernel7l
+  desk> make ARCH=arm CROSS_COMPILE=arm-linux-gnueabihf- bcm2711_defconfig
+
+カーネルをビルドします。ここは少々時間がかかります。
+
+  desk> make -j6 ARCH=arm CROSS_COMPILE=arm-linux-gnueabihf- zImage modules dtbs
+
+これで実験の準備が完了しました。
+
+最初の実験のためのソースコードとMakefileは次のとおりです。
+
+  <exmodule.c>
+
+  <Makefile-exmodule>
+
+以下の説明では、次のディレクトリを仮定します。
+
+  - ~/project/linux-pi/       .... Linuxカーネルのツリー
+  - ~/project/driver/         .... あなたのデバイスドライバのソースファイル
+
+準備ができたら、次のコマンドでデバイスドライバをビルドできます。
+
+  desk> cd ~/project/driver/
+  desk> make
+
+これでexmodule.koモジュールができます。これをpiにコピーしましょう。
+
+  desk> scp exmodule.ko pi:/tmp/
+
+次にpiの上で, モジュールをカーネル上に登録します。
+
+  pi> sudo insmod /tmp/exmodule.ko
+  pi> tail -1 /var/log/messages
+      Dec 12 20:46:18 pi kernel: [83395.088746] exmodule_init()
+
+モジュールが登録されたことは、次のように確認できます。
+
+  pi> lsmod | grep exmodule
+      exmodule               16384  0
+
+モジュールを取り外すには、次のようにします。
+
+  pi> sudo rmmod exmodule
+  pi> tail -2 /var/log/messages
+      Dec 12 20:46:18 pi kernel: [83395.088746] exmodule_init()
+      Dec 12 20:49:13 pi kernel: [83570.075864] exmodule_exit()
+
+* キャラクタデバイス
+
+まず、もっとも簡単なデバイスドライバであるキャラクタデバイスを作ります。ユーザプログラムからopen/close/read/writeができます。
+
+  <exchrdev.c>
+
+Makefileは前回と同じものを使います。次の行を追加してください。
+
+  obj-m += exchrdev.o
+
+desk上でビルドして、piに転送します。
+
+  desk> cd ~/project/driver/
+  desk> make
+  desk> scp exchrdev.ko pi:/tmp/
+
+pi上にインストールします。
+
+  pi> sudo insmod /tmp/exchrdev.ko
+
+このドライバは古い方法で書かれていますので、デバイスノードを別につくる必要があります。
+
+  pi> sudo mknod /dev/exchrdev c 120 1  # 120 is the device number of this driver
+  pi> sudo chmod 666 /dev/exchrdev
+
+ではwrite/readしてみましょう。
+
+  pi> echo "hello world" > /dev/exchrdev
+  pi> cat /dev/exchrdev
+      hello world
+  pi> sudo rmmod exchrdev
+
+この例では、デバイス番号120をつかいました。この番号は"LOCAL/EXPERIMENTAL USE"として予約されています。他にも多くの番号が予約されています。以下のサイトを参照してください。
+
+  https://www.kernel.org/doc/Documentation/admin-guide/devices.txt
+
+この例では、非常に重要な点をひとつ無視しています。それはドライバからのユーザ空間アクセス。この例ではsimple_read_from_buffer()とsimple_write_to_buffer()を使っているので、この点を考える必要がありませんでした。この点を学ぶには、get_user()/put_user()を検索してください。
+
+* デバイスノードの生成
+
+前回は、基本の古いインターフェースを使ってキャラクタデバイスを作りました。デバイス番号は固定でしたし、デバイスノードは手動で作らなくてはいけませんでした。今回は、新しいインターフェースを使います。デバイス番号は自動的に決定され、デバイスノードも自動的に作られます。
+
+ソースコードは以下の通り。簡単にするため、openとcloseだけを定義しています。
+
+  <excdev.c>
+
+Makefileは前回と同じ。以下の行を追加してください。
+
+  obj-m += excdev.o
+
+ビルドしてインストールします。
+
+  desk> cd ~/project/driver/ && make
+  desk> scp excdev.ko pi:/tmp/
+
+  pi> sudo insmod /tmp/excdev.ko
+
+デバイス番号が自動的に決まって、デバイスノードが自動的に作成されたことを確認してください。
+
+  pi> cat /proc/devices | grep excdev
+      239 excdev
+  pi> ls -l /dev/excdev*
+      crw------- 1 root root 239, 0 Dec 13 17:36 /dev/excdev0
+      crw------- 1 root root 239, 1 Dec 13 17:36 /dev/excdev1
+      crw------- 1 root root 239, 2 Dec 13 17:36 /dev/excdev2
+
+ドライバを削除すると、デバイスノードも自動的に削除されます。
+
+  pi> sudo rmmod excdev
+  pi> ls -l /dev/excdev*
+
+* Miscデバイス
+
+ここまで行ったことは、実はもっと簡単に実現できます。Miscデバイスを使うと、ほとんどの処理が自動的に行われますので、ソースコードは驚くほど簡単になります。
+
+  <exmisc.c>
+
+Makefileは前回と同じ。次の行を追加してください。（これ以降、このステップは書きません。）
+
+  obj-m += exmisc.o
+
+ビルドしてインストールします。
+
+Build and do insmod.
+
+  desk> cd ~/project/driver/ && make
+  desk> scp exmisc.ko pi:/tmp/
+
+  pi> sudo insmod /tmp/exmisc.ko
+
+デバイスノードが自動的に作成されたことを確認してください。Miscデバイスのデバイス番号はいつも10で、マイナーデバイス番号で区別されます。以下の場合は60です。
+
+  pi> ls -l /dev/exmisc*
+      crw------- 1 root root 10, 60 Dec 13 18:07 /dev/exmisc
+
+キャラクタデバイス同様、書き込み・読み出しをしてみます。
+
+  pi> sudo bash -c 'echo "hello world" > /dev/exmisc'
+  pi> sudo cat /dev/exmisc
+      hello world
+
+ドライバを削除すると、デバイスノードも自動的に削除されます。
+
+  pi> sudo rmmod exmisc
+  pi> ls -l /dev/exmisc*
+
+* printkとtrace_printk
+
+今回はprint系の関数です。デバッグに関する限り、私のお気に入りはtrace_printk.　この関数はprintkより軽く、割り込みハンドラ中でも使うことができます。
+
+  <extrace.c>
+
+ビルドしてインストールします。
+
+  desk> cd ~/project/driver/ && make
+  desk> scp extrace.ko pi:/tmp/
+
+  pi> sudo insmod /tmp/extrace.ko
+  pi> sudo rmmod extrace
+
+printkの結果は、カーネルのdmesg、systemdのログ、さらにsyslogにも送られます。
+
+  pi> journalctl --since='7 minute ago'
+      .....
+      Dec 14 20:53:17 pi kernel: printed by pr_err
+      Dec 14 20:53:17 pi kernel: printed by pr_warn
+      Dec 14 20:53:17 pi kernel: printed by pr_notice
+      Dec 14 20:53:17 pi kernel: printed by pr_info
+      Dec 14 20:53:17 pi kernel: printed by printk
+      .....
+
+journalctlを使うと、いろいろなフィルタが使えて便利です。
+
+  pi> journalctl --since='7 minute ago' --priority=warning
+      .....
+      Dec 14 20:53:17 pi kernel: printed by pr_err
+      Dec 14 20:53:17 pi kernel: printed by pr_warn
+      Dec 14 20:53:17 pi kernel: printed by printk
+
+次に、trace_printkの結果を見てみましょう。
+
+  pi> sudo cat /sys/kernel/debug/tracing/trace
+  # tracer: nop
+  #
+  # entries-in-buffer/entries-written: 6/6   #P:4
+  #
+  #                                _-----=> irqs-off
+  #                               / _----=> need-resched
+  #                              | / _---=> hardirq/softirq
+  #                              || / _--=> preempt-depth
+  #                              ||| /     delay
+  #           TASK-PID     CPU#  ||||   TIMESTAMP  FUNCTION
+  #              | |         |   ||||      |         |
+              insmod-12915   [003] ....  3024.144240: 0x7f1cd030: printed by trace_printk
+               rmmod-12942   [003] ....  3030.712234: 0x7f1cd000: printed by trace_printk
+
+* ioremapでレジスタアクセス
+
+今回は、はじめて本物のデバイスにアクセスします。ioremapを使って、GPIOのレジスタにアクセスします。
+
+まず次の通り、LEDをGPIOに接続してください。
+
+  GPIO4 --- LED --- 10kOhm --- GND
+
+うまくつなげたかどうか、Pythonで確認してみましょう。
+
+  pi> python3
+  >>> import RPi.GPIO as GPIO
+  >>> GPIO.setmode(GPIO.BCM)
+  >>> GPIO.setup(4, GPIO.OUT)
+  >>> GPIO.output(4, True)    # Turn LED on
+  >>> GPIO.output(4, False)   # Turn LED off
+
+これでデバイスドライバの実験の準備ができました。ソースコードは以下の通り。ioremapを使っているところに注目してください。
+
+  <exgpio.c>
+
+ビルドして、テストします。
+
+  desk> cd ~/project/driver/ && make
+  desk> scp exgpio.ko pi:/tmp/
+
+  pi> sudo insmod /tmp/exgpio.ko
+  pi> sudo sh -c 'echo > /dev/exgpio'  # Turn LED on
+  pi> sudo sh -c 'echo > /dev/exgpio'  # Turn LED off
+
+* 割り込みハンドラ
+
+今回は、割り込みをはじめて使います。
+
+まず次の通り、押しボタンスイッチをGPIOに接続してください。
+
+  GPIO5 --- 10kOhm --- 3.3V
+  GPIO5 --- switch --- GND
+
+Pythonを使ってテストしてみましょう。
+
+  pi> python3
+  >>> import gpiozero
+  >>> button = gpiozero.Button(5)
+  >>> button.wait_for_press()      # ボタン待ち
+
+ボタンを押すと、プロンプトにもどるはずです。
+
+では、割り込みを使ったドライバを書いてみましょう。
+
+  <exinterrupt.c>
+
+ビルドして実行します。
+
+  desk> cd ~/project/driver/ && make
+  desk> scp exinterrupt.ko pi:/tmp/
+
+  pi> sudo insmod /tmp/exinterrupt.ko
+
+割り込みが発生した回数は、以下の方法でチェックできます。
+
+  pi> grep exinterrupt /proc/interrupts
+
+ボタンを押して、GPIO割り込みを発生させてみましょう。上記のコマンドで、割り込みが起こったことを確認してください。表示される回数は、ボタンを押した回数より多いかもしれません。これは、スイッチのチャタリングのせいです。
+
+trace_printkの出力は、次のコマンドで表示できます。
+
+  pi> sudo cat /sys/kernel/debug/tracing/trace
+      # tracer: nop
+      #
+      # entries-in-buffer/entries-written: 1/1   #P:4
+      #
+      #                                _-----=> irqs-off
+      #                               / _----=> need-resched
+      #                              | / _---=> hardirq/softirq
+      #                              || / _--=> preempt-depth
+      #                              ||| /     delay
+      #           TASK-PID     CPU#  ||||   TIMESTAMP  FUNCTION
+      #              | |         |   ||||      |         |
+                <idle>-0       [000] d.h. 262187.256140: exinterrupt_isr: exinterrupt_isr
+
+割り込みハンドラが実行されたことが確認できます。上記の結果で、"h"は割り込みコンテキストであること、"d"は割り込み禁止であることを示しています。最近のLinuxカーネル上では、割り込みハンドラは割り込み禁止の状態で実行されます。
+
+割り込みハンドラは、非常に危険な状態で走ることに注意してください。割り込みハンドラは、他の関数の実行を中断して実行されます。割り込みハンドラは、Linuxカーネルさえ中断して実行されます。
+
+* イベント待ち
+
+前回の例では、GPIOからの割り込みで、割り込みハンドラを起動させました。
+
+今回は、もっと実際に近い状況を取り上げます。デバイスドライバは割り込みを待ち状態で待機し、割り込みハンドラからのイベントで起床します。
+
+  <exwaitqueue.c>
+
+ビルドして実行してみましょう。
+
+  desk> cd ~/project/driver/ && make
+  desk> scp exwaitqueue.ko pi:/tmp/
+
+  pi> sudo insmod /tmp/exwaitqueue.ko
+
+デバイスからreadすると、wait_event_interruptible()で待ち状態になります。
+
+  pi> sudo cat /dev/exwaitqueue
+
+ボタンを押して割り込みを発生させてみてください。前のコマンドが完了するはずです。
+
+trace_printkの出力を見てみましょう。
+
+  pi> sudo cat /sys/kernel/debug/tracing/trace
+  .....
+             cat-21921   [002] .... 71419.797046: exwaitqueue_read: read() waits for interrupt
+          <idle>-0       [000] d.h. 71437.007315: exwaitqueue_isr: Interrupt handler
+             cat-21921   [002] .... 71437.007389: exwaitqueue_read: read() is woken up
+          <idle>-0       [000] d.h. 71437.099921: exwaitqueue_isr: Interrupt handler
+
+* Threaded IRQ
+
+割り込みハンドラは、CPUが現在行っている仕事を中断して実行されます。中断を最小限にとどめるため、割り込みハンドラは非常に短い必要があります。さらに、割り込みハンドラはプロセスコンテキストではありませんから、待ち状態になる関数を呼ぶことはできません。したがって、割り込みに起因する仕事が長くなるときは、最小限を割り込みハンドラで実行して、残りの仕事をカーネルスレッドで行うことになります。Threaded IRQを使うと、この分担を自然に記述することができます。
+
+  <exthreaded.c>
+
+ビルドして実行してください。  
+
+  desk> cd ~/project/driver/ && make
+  desk> scp exthreaded.ko pi:/tmp/
+
+  pi> sudo insmod /tmp/exthreaded.ko
+
+ボタンを押して、割り込みを発生させてください。
+
+trace_printkの出力を見てみましょう。
+
+  pi> sudo cat /sys/kernel/debug/tracing/trace
+  .....
+           <idle>-0       [000] d.h. 177739.548396: exthreaded_isr: Interrupt handler
+  irq/166-exthrea-16723   [002] .... 177739.548453: exthreaded_thread: Thread
+
+割り込みハンドラが先に実行され、次にスレッドが実行されています。
+
+* ワークキュー
+
+前回のThreaded IRQは、割り込み処理のの後半を担当するスレッドをつくるのに便利でした。もっと一般的な用途でカーネルスレッドを作りたい場合は、ワークキューが便利です。
+
+  <exworkqueue.c>
+
+ビルドして実行してみましょう。
+
+  desk> cd ~/project/driver/ && make
+  desk> scp exworkqueue.ko pi:/tmp/
+
+  pi> sudo insmod /tmp/exworkqueue.ko
+
+この時点で、次の２つのスレッドが走っています。
+
+  - exworkqueue_work: ５回反復、毎回10msスリープ状態になる。
+  - exworkqueue_delayed_work: 50ms待って、一回だけ実行。
+
+trace_printkの出力を見てみましょう。
+
+  pi> sudo rmmod exworkqueue
+  pi> sudo cat /sys/kernel/debug/tracing/trace
+     .....
+     kworker/1:2-25051   [001] .... 180736.601623: 0x7f1cd054: exworkqueue_work(): 0
+     kworker/1:2-25051   [001] .... 180736.630242: 0x7f1cd054: exworkqueue_work(): 1
+     kworker/1:1-28682   [001] .... 180736.660244: 0x7f1cd000: exworkqueue_delayed_work()
+     kworker/1:2-25051   [001] .... 180736.670334: 0x7f1cd054: exworkqueue_work(): 2
+     kworker/1:2-25051   [001] .... 180736.700218: 0x7f1cd054: exworkqueue_work(): 3
+     kworker/1:2-25051   [001] .... 180736.730220: 0x7f1cd054: exworkqueue_work(): 4
+
+* Mutexとatomic
+
+デバイスドライバの中に複数のスレッドがある場合、排他制御を考慮に入れないといけません。今回は、それをあえて無視して、問題を実際に起こしてみます。あわせて、解決方法も２つ出します：MutexとAtomicです。
+
+  <exmutex.c>
+
+このプログラムは４つのスレッドを、それぞれ異なるCPU上で同時に実行します。４つのスレッドは、それぞれフルスピードで回って、3種類のカウンタをカウントアップします。3つのカウンタは、4つのスレッドから同時にアクセスされますので、ここに排他制御が必要です。しかし、最初のカウンタには、あえて排他制御なしでアクセスしています。ここで当然、悪いことがおきます。2つ目のカウンタはMutexで排他制御しています。3つ目のカウンタにはatomic変数を使っています。
+
+ビルドして実行してみましょう。
+
+  desk> cd ~/project/driver/ && make
+  desk> scp exmutex.ko pi:/tmp/
+
+  pi> sudo insmod /tmp/exmutex.ko
+
+trace_printkの結果を見てみましょう。
+
+  pi> sudo rmmod exmutex
+  pi> sudo cat /sys/kernel/debug/tracing/trace
+  .....
+      insmod-8264    [003] .... 26397.328512: 0x7f1cd148: counter: 3830342 < 3830467 == 3830467
+          
+3830342は、最初のカウンタの結果ですが、他のカウンタより小さい値になっています。これは、複数のスレッドが同時に読み出し・+1・書き込みの動作を行ったせいです。この例では、3830467が正しい値でした。他の2つのカウンタは一致する結果を示しています。
+
+* Spinlockとatomic
+
+前回は、複数のスレッド間の排他制御を見ました。スレッドは休止状態に入ることができるので、mutexが有効な手段でした。しかし、割り込みハンドラが絡んでいる場合には、mutexは使えません。その場合は、spinlockが有効です。この場合にも、atomicは使えます。
+
+  <exspinlock.c>
+
+このプログラムでは、デバイスドライバのスレッドが1本、それに加えて高速タイマで割り込みハンドラが実行されます。この2つの関数が、3つのカウンタに同時にアクセスします。最初のカウンタには、あえて排他制御なしでアクセスしています。2つ目のカウンタはspinlockで排他制御しています。3つ目のカウンタにはatomic変数を使っています。
+
+ビルドして実行してみましょう。
+
+  desk> cd ~/project/driver/ && make
+  desk> scp exspinlock.ko pi:/tmp/
+
+  pi> sudo insmod /tmp/exspinlock.ko
+
+trace_printkの結果を見てみましょう。
+
+  pi> sudo rmmod exspinlock
+  pi> sudo cat /sys/kernel/debug/tracing/trace
+  .....
+  insmod-27285   [000] .n.. 39410.225181: 0x7f1cd184: counter: 542247 < 542436 == 542436
+         
+542247は、最初のカウンタの結果ですが、排他制御を無視した結果、他のカウンタより小さい値になっています。この例では、542436が正しい値でした。他の2つのカウンタは一致する結果を示しています。
+
+* ======================================================================
+Local Variables:
+mode: outline
+compile-command: "python3 TextToHtml.py LearnByDoingLinuxDriver-jp"
+End:
